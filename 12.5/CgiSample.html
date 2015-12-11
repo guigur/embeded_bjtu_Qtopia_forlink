@@ -1,0 +1,24 @@
+<html>
+	<head><title>Cgi Sample</title></head>
+	<body>
+		Get Sample:<br>
+		Sample 1<br>
+		<form name="input" action="cgi-bin/CgiSample.cgi" method="get">
+		Username: <input type="text" name="user">
+		Passwd: <input type="password" name="password">
+		<input type="submit" value="Submit">
+		</form>
+		
+		<br>
+		<a href="cgi-bin/CgiSample.cgi">Sample 2</a>
+		<br>
+		<a href="cgi-bin/CgiSample.cgi?user=neu&password=123">Sample 3</a>
+		<hr>
+		Post Sample:<br>
+		<form name="input" action="cgi-bin/CgiSample.cgi" method="post">
+		Username: <input type="text" name="user">
+		Passwd: <input type="password" name="password">
+		<input type="submit" value="Submit">
+		<hr>
+	</body>
+</html>
