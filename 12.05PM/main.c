@@ -20,9 +20,9 @@
 #define RGB24(R,G,B) ((R<<16)|(G<<8)|B)
 #define RGB32(A,R,G,B) ((A<<24)|(R<<16)|(G<<8)|B)
 
-#define  SCREENWIDTH 1920 //480
-#define  SCREENHEIGHT 1080// 272//
-#define  BPP 32//16
+#define  SCREENWIDTH 480
+#define  SCREENHEIGHT 272
+#define  BPP 16
 
 void	draw_pix(int x, int y, int color, char *fbmem_addr)
 {
@@ -58,21 +58,20 @@ int	main()
   char *fbmem_addr;
   struct fb_var_screeninfo modeinfo;
   
-  if (fd = open("/dev/fb0", O_RDWR) == -1)
+  if ((fd = open("/dev/fb0", O_RDWR)) == -1)
     {
       printf("failed to open the fb0");
       return (-1);
     }
    fbmem_addr = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-  int color = RGB32(255,0xFF, 0, 0);
-  int i = 0;
-
-  icotl(fd,FBIOGET_VSCREENINFO, &modeinfo);
-
-  draw_rect(0, 0,1000, 1000, RGB32(255,75, 56, 2), fbmem_addr);
-  /*draw_rect(12, 78,200, 200, RGB(55, 5, 54), fbmem_addr);
-  draw_rect(5, 0,225, 206, RGB(88, 66, 5), fbmem_addr);
+   
+   // int color = RGB16(0xFF, 0, 0);
+   ioctl(fd,FBIOGET_VSCREENINFO, &modeinfo);
+   
+   //draw_pix(200, 200,RGB(70, 0, 0), fbmem_addr);
+    draw_rect(0, 0,200, 200, RGB16(255, 56, 2), fbmem_addr);
+   // draw_rect(12, 78,200, 200, RGB(55, 5, 54), fbmem_addr);
+  /*draw_rect(5, 0,225, 206, RGB(88, 66, 5), fbmem_addr);
   draw_rect(2, 20,58, 105, RGB(12, 100, 53), fbmem_addr);
   draw_rect(100, 78,200, 200, RGB(00, 25, 53), fbmem_addr);
   draw_rect(17, 78,200, 200, RGB(200, 42, 11), fbmem_addr);
