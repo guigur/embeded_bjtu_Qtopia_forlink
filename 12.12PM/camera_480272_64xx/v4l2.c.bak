@@ -1,0 +1,1134 @@
+/*
+ * TEST V4L2
+ *
+ *   bushi@mizi.com
+ *
+ *   preview : 240x160 overlay on 240x320 16bpp LCD
+ *
+ *   capture : 640x480
+ *
+ *
+ */
+#include <sys/time.h>
+#include <sys/types.h>
+#include <asm/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+//#include <sys/ioctl.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <errno.h>
+
+#include <jpeglib.h>
+
+#include <linux/fs.h>
+#include <linux/kernel.h>
+#include "videodev.h"
+#include <linux/fb.h>
+
+#define PIXFMT_NUM 5
+#define INPUT_NUM 5
+#define CTRL_NUM 100
+
+#define COLS 320
+#define ROWS 240
+//#define JPEG_TEST
+
+//#define V4L2_DEV_NODE "/dev/video/preview"
+#define V4L2_DEV_NODE "/dev/video/codec"
+#define FB_DEV_NODE "/dev/fb0"
+
+#define RGB_FILE "rgb.jpg"
+#define YUV420_FILE "yuv420.jpg"
+
+
+static unsigned short image_width = 240;
+static unsigned short image_height = 320;
+static int fb_xres = 480;
+static int fb_yres = 272;
+
+
+typedef struct v4l2_input    V_INPUT;
+typedef struct v4l2_format   V_FORMAT;
+typedef struct v4l2_fmtdesc  V_FMTDESC;
+typedef struct v4l2_queryctrl V_QRYCTRL;
+
+typedef struct fb_var_screeninfo F_VINFO;
+
+static struct jpeg_compress_struct cinfo;
+static int quality = 100;
+static struct jpeg_error_mgr jerr;
+
+static char *name_of_ctrl_type[] = {
+	[V4L2_CTRL_TYPE_INTEGER] = "INTEGER",
+	[V4L2_CTRL_TYPE_BOOLEAN] = "BOOLEAN",
+	[V4L2_CTRL_TYPE_MENU] = "MENU",
+	[V4L2_CTRL_TYPE_BUTTON] = "BUTTON",
+};
+
+
+#define	YCbCrtoR(Y,Cb,Cr)	(1000*Y + 1371*(Cr-128))/1000
+#define	YCbCrtoG(Y,Cb,Cr)	(1000*Y - 336*(Cb-128) - 698*(Cr-128))/1000
+#define	YCbCrtoB(Y,Cb,Cr)	(1000*Y + 1732*(Cb-128))/1000
+#define	min(x1, x2)		(((x1)<(x2))?(x1):(x2))
+
+__u32 Conv_YCbCr_Rgb(__u8 y0, __u8 y1, __u8 cb0, __u8 cr0)
+{
+	// bit order is
+	// YCbCr = [Cr0 Y1 Cb0 Y0], RGB=[R1,G1,B1,R0,G0,B0].
+	
+	int r0, g0, b0, r1, g1, b1;
+	__u16 rgb0, rgb1;
+	__u32 rgb;
+ 
+	#if 1 // 4 frames/s @192MHz, 12MHz ; 6 frames/s @450MHz, 12MHz
+	r0 = YCbCrtoR(y0, cb0, cr0);
+	g0 = YCbCrtoG(y0, cb0, cr0);
+	b0 = YCbCrtoB(y0, cb0, cr0);
+	r1 = YCbCrtoR(y1, cb0, cr0);
+	g1 = YCbCrtoG(y1, cb0, cr0);
+	b1 = YCbCrtoB(y1, cb0, cr0);
+	#endif
+
+	if (r0>255 ) r0 = 255;
+	if (r0<0) r0 = 0;
+	if (g0>255 ) g0 = 255;
+	if (g0<0) g0 = 0;
+	if (b0>255 ) b0 = 255;
+	if (b0<0) b0 = 0;
+
+	if (r1>255 ) r1 = 255;
+	if (r1<0) r1 = 0;
+	if (g1>255 ) g1 = 255;
+	if (g1<0) g1 = 0;
+	if (b1>255 ) b1 = 255;
+	if (b1<0) b1 = 0;
+	
+	// 5:6:5 16bit format
+	rgb0 = (((__u16)r0>>3)<<11) | (((__u16)g0>>2)<<5) | (((__u16)b0>>3)<<0);	//RGB565.
+	rgb1 = (((__u16)r1>>3)<<11) | (((__u16)g1>>2)<<5) | (((__u16)b1>>3)<<0);	//RGB565.
+
+	rgb = (rgb1<<16) | rgb0;
+
+	return(rgb);
+}
+
+static char yuv_interval[] = {0, 2, 4, 8, 16};
+
+static void ccvt_420p_rgb565(int width, int height, const unsigned char *src, __u16 *dst)
+{
+	int line, col, linewidth;
+	int y, u, v, yy, vr, ug, vg, ub;
+	int r, g, b;
+	const unsigned char *py, *pu, *pv;
+
+	linewidth = width >> 1;
+	py = src;
+	pu = py + (width * height);
+	pv = pu + (width * height) / 4;
+
+	y = *py++;
+	yy = y << 8;
+	u = *pu - 128;
+	ug =   88 * u;
+	ub =  454 * u;
+	v = *pv - 128;
+	vg =  183 * v;
+	vr =  359 * v;
+
+	for (line = 0; line < height; line++) {
+		for (col = 0; col < width; col++) {
+			r = (yy +      vr) >> 8;
+			g = (yy - ug - vg) >> 8;
+			b = (yy + ub     ) >> 8;
+
+			if (r < 0)   r = 0;
+			if (r > 255) r = 255;
+			if (g < 0)   g = 0;
+			if (g > 255) g = 255;
+			if (b < 0)   b = 0;
+			if (b > 255) b = 255;
+
+		*((__u16 *)dst++) =	(((__u16)r>>3)<<11) | (((__u16)g>>2)<<5) | (((__u16)b>>3)<<0);	
+		
+			y = *py++;
+			yy = y << 8;
+			if (col & 1) {
+				pu++;
+				pv++;
+
+				u = *pu - 128;
+				ug =   88 * u;
+				ub =  454 * u;
+				v = *pv - 128;
+				vg =  183 * v;
+				vr =  359 * v;
+			}
+		} /* ..for col */
+		if ((line & 1) == 0) { // even line: rewind
+			pu -= linewidth;
+			pv -= linewidth;
+		}
+	} /* ..for line */
+}
+
+static void show_cam_img(void *scr, __u8 *y_buf, __u8 *cb_buf, __u8 *cr_buf)
+{
+	__u16 x, y, w, h;//, i, f;
+	__u16 *fb_buf = (__u16 *)scr;
+	__u32 rgb_data;
+	//int palette = optional_image_format[image_format].palette;
+	w=320;h=240;
+
+		fb_buf += (480*14);
+
+			for(y=0; y<h; y++) {
+				for(x=0; x<w; x+=2) {	//calculate 2 times
+	
+			
+						rgb_data = Conv_YCbCr_Rgb(y_buf[x],
+									y_buf[(x)+1],
+									cb_buf[(x)>>1],
+									cr_buf[(x)>>1]);
+						fb_buf[28+x]   = rgb_data;
+						fb_buf[x+29] = rgb_data>>16;
+
+				}
+				fb_buf += 480;
+				y_buf += 320;
+				cb_buf += (320)>>1;
+				cr_buf += (320)>>1;
+			}
+
+}
+
+static void show_cam_img1(void *scr, __u8 *y_buf, __u8 *cb_buf, __u8 *cr_buf)
+{
+	__u16 x, y, w, h;//, i, f;
+	__u16 *fb_buf = (__u16 *)scr;
+	__u32 rgb_data;
+	//int palette = optional_image_format[image_format].palette;
+	w=240;h=240;
+
+		fb_buf += (480*14);
+
+			for(y=0; y<h; y++) {
+				for(x=0; x<w; x+=2) {	//calculate 2 times
+	
+						fb_buf[x+28]   = Conv_YCbCr_Rgb(y_buf[x<<1],
+									y_buf[(x<<1)+1],
+									cb_buf[x],
+									cr_buf[x]);
+						fb_buf[x+29] = Conv_YCbCr_Rgb(y_buf[(x<<1)+yuv_interval[1]],
+									y_buf[(x<<1)+1+yuv_interval[1]],
+									cb_buf[((x<<1)+yuv_interval[1])>>1],
+									cr_buf[((x<<1)+yuv_interval[1])>>1]);
+					}
+				fb_buf += 480;
+				y_buf += 240<<1;
+				cb_buf += 240;
+				cr_buf += 240;
+			}
+
+}
+
+static void show_cam_img2(void *scr, __u8 *y_buf, __u8 *cb_buf, __u8 *cr_buf)
+{
+	__u16 x, y, w, h, i, f;
+	__u16 *fb_buf = (__u16 *)scr;
+	__u32 rgb_data;
+	
+	
+	for(i=0; i<4; i++) {	//0,1,2,3
+		if((image_width>>i)<=fb_xres) {
+			f = 0;
+			w = min(image_width>>i, fb_xres);
+			h = min(image_height>>i, fb_yres);
+			break;
+		}
+		if((image_height>>i)<=fb_yres) {
+			f = 1;
+			w = min(image_width>>i, fb_yres);
+			h = min(image_height>>i, fb_xres);
+			break;
+		}
+	}
+	if(i>=4)
+		return;
+	printf("%d,%d %d,%d\n", i, f, w, h);
+	//i = 1;
+
+		if(!f) {
+			for(y=0; y<h; y++) {
+				for(x=0; x<w; x+=2) {	//calculate 2 times
+					if(i) {
+						fb_buf[x]   = Conv_YCbCr_Rgb(y_buf[x<<i],
+									y_buf[(x<<i)+1],
+									cb_buf[(x<<i)>>1],
+									cr_buf[(x<<i)>>1]);
+						fb_buf[x+1] = Conv_YCbCr_Rgb(y_buf[(x<<i)+yuv_interval[i]],
+									y_buf[(x<<i)+1+yuv_interval[i]],
+									cb_buf[((x<<i)+yuv_interval[i])>>1],
+									cr_buf[((x<<i)+yuv_interval[i])>>1]);
+					} else {
+						rgb_data = Conv_YCbCr_Rgb(y_buf[x<<i],
+									y_buf[(x<<i)+1],
+									cb_buf[(x<<i)>>1],
+									cr_buf[(x<<i)>>1]);
+						fb_buf[x]   = rgb_data;
+						fb_buf[x+1] = rgb_data>>16;
+					}
+				}
+				fb_buf += fb_xres;
+				y_buf += image_width<<i;
+				cb_buf += (image_width<<i)>>1;
+				cr_buf += (image_width<<i)>>1;
+			}
+		} else {
+			for(y=0; y<h; y++) {
+				for(x=0; x<w; x+=2) {
+					if(i) {
+						fb_buf[(fb_yres-x-1)*fb_xres+y] = Conv_YCbCr_Rgb(y_buf[x<<i],
+								y_buf[(x<<i)+1],
+								cb_buf[(x<<i)>>1],
+								cr_buf[(x<<i)>>1]);
+						fb_buf[(fb_yres-x-2)*fb_xres+y] = Conv_YCbCr_Rgb(y_buf[(x<<i)+yuv_interval[i]],
+									y_buf[(x<<i)+1+yuv_interval[i]],
+									cb_buf[((x<<i)+yuv_interval[i])>>1],
+									cr_buf[((x<<i)+yuv_interval[i])>>1]);
+					} else {
+						rgb_data = Conv_YCbCr_Rgb(y_buf[x<<i],
+									y_buf[(x<<i)+1],
+									cb_buf[(x<<i)>>1],
+									cr_buf[(x<<i)>>1]);
+						fb_buf[(fb_yres-x-1)*fb_xres+y] = rgb_data;
+						fb_buf[(fb_yres-x-2)*fb_xres+y] = fb_buf[x+1] = rgb_data>>16;
+					}
+				}
+				y_buf += image_width<<i;
+				cb_buf += (image_width<<i)>>1;
+				cr_buf += (image_width<<i)>>1;
+			}
+		}
+	
+}
+
+static void show_rgb565_img(void *scr, __u16 *data_buf)
+{	
+	__u16 x, y;
+	__u16 *fb_buf = (__u16 *)scr;
+	fb_buf += (480*14);
+		
+		
+			for(y=0; y<ROWS; y++) {
+				for(x=0; x<COLS; x++) {	//calculate 2 time
+						fb_buf[x+28]   = *data_buf++ ;
+					}
+				fb_buf += 480;
+			}
+}
+
+
+static void v4l2_print_settings(int fd, 
+		V_INPUT *inp, V_FORMAT *fmt, V_FMTDESC *pix, V_QRYCTRL *qc)
+{
+	int i;
+	int pixnum = 0;
+	int inputnum = 0;
+	int ctrlnum = 0;
+	V_INPUT *inp_0 = inp;
+	V_FMTDESC *pix_0 = pix;
+	V_QRYCTRL *qc_0 = qc;
+
+	for (i = 0; i < INPUT_NUM; i++) {
+		inp->index = i;
+		if (ioctl(fd, VIDIOC_ENUMINPUT, inp) < 0) {
+			break;
+		}
+		inp++;
+		inputnum++;
+	}
+
+	for (i = 0; i < PIXFMT_NUM; i++) {
+		pix->index = i;
+		if (ioctl(fd, VIDIOC_ENUM_PIXFMT, pix) < 0)
+			break;
+		pix++;
+		pixnum++;
+	}
+
+	for (i = 0; i < CTRL_NUM; i++) {
+		qc->id = V4L2_CID_BASE + i;	
+		if (ioctl(fd, VIDIOC_QUERYCTRL, qc) < 0)
+			break;
+		if (!(qc->flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_GRABBED))) {
+			ctrlnum++;
+			qc++;
+		}
+	}
+	for (i = 0; i < CTRL_NUM; i++) {
+		qc->id = V4L2_CID_PRIVATE_BASE + i;
+		if (ioctl(fd, VIDIOC_QUERYCTRL, qc) < 0)
+			break;
+		if (!(qc->flags & (V4L2_CTRL_FLAG_DISABLED | V4L2_CTRL_FLAG_GRABBED))) {
+			ctrlnum++;
+			qc++;
+		}
+	}
+	qc->id = 0;
+
+	fmt->type = V4L2_BUF_TYPE_CAPTURE;
+	if (ioctl(fd, VIDIOC_G_FMT, fmt) < 0)
+		perror("getting video format");
+
+
+	printf("   available inputs are:\n");
+	inp = inp_0;
+	for (i = 0; i < inputnum; i++) {
+		printf("     [%02d] - %s\n", inp->index, inp->name);
+		inp++;
+	}
+	printf("\n");
+
+	printf("   available fomats are:\n");
+	pix = pix_0;
+	for (i = 0; i < pixnum; i++) {
+		printf("     [%02d] - %-15s (%d bpp), 0x%x\n",
+		       pix->index, pix->description, pix->depth, pix->pixelformat);
+		pix++;
+	}
+	printf("\n");
+
+	printf("   available controls are:\n");
+	qc = qc_0;
+	for (i = 0; i < ctrlnum; i++) {
+		printf("     [%2d] - \"%s\" [%7s] %d~%d (step:%d default:%d)\n", i
+				, qc->name
+				, name_of_ctrl_type[qc->type]
+				, qc->minimum, qc->maximum, qc->step, qc->default_value);
+		qc++;
+	}
+	printf("\n");
+
+	printf("   driver's current selection is:\n");
+	inp = inp_0;
+	printf("     %d x %d @ %d bpp from input [%d] (%s)\n",
+	       fmt->fmt.pix.width, fmt->fmt.pix.height, fmt->fmt.pix.depth, 
+		   inp->index, inp->name);
+	printf("\n");
+}
+
+static void v4l2_config_for_preview(int fd, V_FORMAT *fmt, V_FMTDESC *pix)
+{
+	int i;
+	V_FORMAT fmt_req;
+	V_FORMAT fmt_ret;
+
+	for (i=0; i < PIXFMT_NUM; i++) {
+		if (pix->pixelformat == V4L2_PIX_FMT_RGB565)
+			break;
+		pix++;
+	}
+	if (i == PIXFMT_NUM) {
+//		printf("there is not pixel format for preview\n");	
+		exit (EXIT_FAILURE);
+	}
+
+	memcpy(&fmt_req, fmt, sizeof(V_FORMAT));
+	fmt_req.type = V4L2_BUF_TYPE_CAPTURE;
+	fmt_req.fmt.pix.width = 240;
+	fmt_req.fmt.pix.height = 160;
+	fmt_req.fmt.pix.depth = 16;
+	fmt_req.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB565;
+
+	if (ioctl(fd, VIDIOC_S_FMT, &fmt_req) < 0) {
+		perror("VIDIOC_S_FMT");
+		exit (EXIT_FAILURE);
+	}
+
+	fmt_ret.type = V4L2_BUF_TYPE_CAPTURE;
+	if (ioctl(fd, VIDIOC_G_FMT, &fmt_ret) < 0)
+		perror("getting video format");
+
+	printf("   driver's modified selection is:\n");
+	printf("     %d x %d @ %d bpp, RGB565\n",
+	       fmt_ret.fmt.pix.width, fmt_ret.fmt.pix.height, 
+		   fmt_ret.fmt.pix.depth);
+	printf("\n");
+}
+
+static void v4l2_config_for_rgb_capture(int fd, V_FORMAT *fmt, V_FMTDESC *pix)
+{
+	int i;
+	V_FORMAT fmt_req;
+	V_FORMAT fmt_ret;
+
+	for (i=0; i < PIXFMT_NUM; i++) {
+		if (pix->pixelformat == V4L2_PIX_FMT_RGB32)
+			break;
+		pix++;
+	}
+	if (i == PIXFMT_NUM) {
+		printf("there is not pixel format for capture\n");	
+		exit (EXIT_FAILURE);
+	}
+
+	memcpy(&fmt_req, fmt, sizeof(V_FORMAT));
+	fmt_req.type = V4L2_BUF_TYPE_CAPTURE;
+	fmt_req.fmt.pix.width = 640;
+	fmt_req.fmt.pix.height = 480;
+	fmt_req.fmt.pix.depth = 32;
+	fmt_req.fmt.pix.pixelformat = V4L2_PIX_FMT_RGB32;
+
+	if (ioctl(fd, VIDIOC_S_FMT, &fmt_req) < 0) {
+		perror("VIDIOC_S_FMT");
+//		exit (EXIT_FAILURE);
+	}
+
+	fmt_ret.type = V4L2_BUF_TYPE_CAPTURE;
+	if (ioctl(fd, VIDIOC_G_FMT, &fmt_ret) < 0)
+		perror("getting video format");
+
+	printf("   driver's modified selection is:\n");
+	printf("     %d x %d @ %d bpp, RGB32\n",
+	       fmt_ret.fmt.pix.width, fmt_ret.fmt.pix.height, 
+		   fmt_ret.fmt.pix.depth);
+	printf("\n");
+}
+
+static void v4l2_config_for_yuv420_capture(int fd, V_FORMAT *fmt, V_FMTDESC *pix)
+{
+	int i;
+	V_FORMAT fmt_req;
+	V_FORMAT fmt_ret;
+
+	for (i=0; i < PIXFMT_NUM; i++) {
+		if (pix->pixelformat == V4L2_PIX_FMT_YUV420)
+			break;
+		pix++;
+	}
+	if (i == PIXFMT_NUM) {
+		printf("there is not pixel format for capture\n");	
+	//	exit (EXIT_FAILURE);
+	}
+
+	memcpy(&fmt_req, fmt, sizeof(V_FORMAT));
+	fmt_req.type = V4L2_BUF_TYPE_CAPTURE;
+	fmt_req.fmt.pix.width = 640;
+	fmt_req.fmt.pix.height = 480;
+	fmt_req.fmt.pix.depth = 12;
+	fmt_req.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV420;
+
+	if (ioctl(fd, VIDIOC_S_FMT, &fmt_req) < 0) {
+		perror("VIDIOC_S_FMT");
+		exit (EXIT_FAILURE);
+	}
+
+	fmt_ret.type = V4L2_BUF_TYPE_CAPTURE;
+	if (ioctl(fd, VIDIOC_G_FMT, &fmt_ret) < 0)
+		perror("getting video format");
+
+	printf("   driver's modified selection is:\n");
+	printf("     %d x %d @ %d bpp, YUV420\n",
+	       fmt_ret.fmt.pix.width, fmt_ret.fmt.pix.height, 
+		   fmt_ret.fmt.pix.depth);
+	printf("\n");
+}
+
+static void v4l2_show_on_fb(int fd, char *fbmem, int frames)
+{
+	int i;
+	int ret;
+	char preview_buf[240*160*2];
+
+	for (i = 0; i < frames; i++) {
+		if ((ret = read (fd, &preview_buf, 240*160*2)) < 0) {
+			perror("read");
+			return;
+		}
+#if 0
+		{
+		int y;
+		for (y = 0; y < 160; y++) 
+			memcpy(fbmem + 240*2*y, preview_buf + 240*2*y, 240*2);
+		}
+#else
+		memcpy(fbmem, &preview_buf, 240*160*2);
+#endif
+		printf("\r%3d", i);
+		fflush(stdout);
+	}
+
+	printf("\n");
+}
+
+#if 0
+static void v4l2_save_rgb32_to_jpg(int fd)
+{
+	char rgb32buf[640*480*4];
+	unsigned int y,x = 0;
+	FILE *jpg_fp = NULL;
+	unsigned long *rgb32 = (unsigned long*)&rgb32buf[0];
+	unsigned long *rgb32_p = rgb32;
+	unsigned char *rgb24 = &rgb32buf[0];
+	unsigned long tmp;
+	char *base;
+	JSAMPROW row_pointer[1] = {(JSAMPROW)rgb24};
+
+	if ((read (fd, &rgb32buf, 640*480*4)) < 0) {
+		perror("read");
+		return;
+	}
+
+	jpg_fp = fopen(RGB_FILE, "wb");
+	if (!jpg_fp) {
+		perror(RGB_FILE);
+		return;
+	}
+
+	cinfo.err = jpeg_std_error(&jerr);
+	jpeg_create_compress(&cinfo);
+
+	jpeg_stdio_dest(&cinfo, jpg_fp);
+
+	cinfo.image_width = 640;
+	cinfo.image_height = 480;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_RGB;
+
+	jpeg_set_defaults(&cinfo);
+
+	jpeg_set_quality(&cinfo, quality, TRUE);
+	
+	jpeg_start_compress(&cinfo, TRUE);
+
+	/* xRGB -> RGB */
+	for (y = 0; y < 480; y++) {
+		rgb32_p = rgb32 + y*640;
+		base = rgb24;
+		for (x = 0; x < 640; x++) {
+			tmp = *(rgb32_p + x);
+			*base++ = (tmp >> 16) & 0xff;
+			*base++ = (tmp >>  8) & 0xff;
+			*base++ = (tmp >>  0) & 0xff;
+		}
+		jpeg_write_scanlines(&cinfo, row_pointer, 1);
+	}
+
+	jpeg_finish_compress(&cinfo);
+	jpeg_destroy_compress(&cinfo);
+
+	if (jpg_fp)
+		fclose(jpg_fp);
+
+	printf("   save to \"%s\"\n", RGB_FILE);
+}
+#endif
+
+
+static inline void v4l2_save_rgb16_to_jpg(int cam_fp, int width, int height)
+{
+	int x, y;
+	FILE *jpg_fp = NULL;
+	char file_name[100];
+	unsigned char *rgb24 = NULL;
+	unsigned short *rgb16 = NULL;
+	JSAMPROW row_pointer[1];
+
+	rgb24 = (unsigned char*)malloc(width*3);
+	rgb16 = (unsigned short*)malloc(width*height*2);
+	row_pointer[0] = (JSAMPROW)rgb24;
+
+	 /* read from device */
+	if (read(cam_fp, (char*)rgb16, width*height*2) < 0) {
+		perror("read()");
+		goto err;
+	}
+
+	sprintf(&file_name[0], "rgb.jpg");
+	/* file create/open, note to "wb" */
+	jpg_fp = fopen(&file_name[0], "wb");
+	if (!jpg_fp) {
+		perror(&file_name[0]);
+		goto err;
+	}
+
+	printf("save to \"%s\"\n", file_name);
+
+	cinfo.err = jpeg_std_error(&jerr);
+	jpeg_create_compress(&cinfo);
+
+	jpeg_stdio_dest(&cinfo, jpg_fp);
+
+	cinfo.image_width = width;
+	cinfo.image_height = height;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_RGB;
+
+	jpeg_set_defaults(&cinfo);
+
+	jpeg_set_quality(&cinfo, quality, TRUE);
+
+	jpeg_start_compress(&cinfo, TRUE);
+
+	/* RGB565 -> RGB888, compress */
+	for (y = 0; y < height; y++) {
+		for (x = 0; x < width; x++) {
+			*(rgb24 + x*3+0) = ((*(rgb16 + y*width + x) & 0xf800) >> 8) & 0xff;
+			*(rgb24 + x*3+1) = ((*(rgb16 + y*width + x) & 0x07e0) >> 3) & 0xff;
+			*(rgb24 + x*3+2) = ((*(rgb16 + y*width + x) & 0x001f) << 3) & 0xff;
+		}
+		jpeg_write_scanlines(&cinfo, row_pointer, 1);
+	}
+
+	jpeg_finish_compress(&cinfo);
+	jpeg_destroy_compress(&cinfo);
+
+	fclose(jpg_fp);
+
+err:
+	if (rgb24)
+		free(rgb24);
+	if (rgb16)
+		free(rgb16);
+}
+#define XLATTABSIZE      256
+#define MulDiv(x, y, z)	((long)((int) x * (int) y) / (int) z)
+
+//#define CLIP(x)	min_t(int, 255, max_t(int, 0, (x)))
+#define CLIP(x) {if(x<0) x=0;if(x>255) x=255;}
+
+int XlatY[XLATTABSIZE] = { 0 };
+int XlatV_B[XLATTABSIZE] = { 0 };
+int XlatV_G[XLATTABSIZE] = { 0 };
+int XlatU_G[XLATTABSIZE] = { 0 };
+int XlatU_R[XLATTABSIZE] = { 0 };
+
+#define MIN(a,b) ((a)>(b) ? (b):(a))
+#define MAX(a,b) ((a)>(b) ? (a):(b))
+
+static void inline init_yuvtable (void)
+{
+	int i, j;
+
+	for (i = 0; i < XLATTABSIZE; i++) {
+#if ORIG_XLAT
+		j = MIN(253, MAX(16, i));
+#else
+		j = (255 * i + 110) / 220;	// scale up
+		j = MIN(255, MAX(j, 16));
+#endif
+		// orig: XlatY[i] = (int ) j;
+		XlatY[i] = j-16;
+	}
+
+	for (i = 0; i < XLATTABSIZE; i++) {
+#if ORIG_XLAT
+		j = MIN(240, MAX(16, i));
+		j -= 128;
+#else
+		j = i - 128;		// make signed
+		if (j < 0)
+			j++;			// noise reduction
+		j = (127 * j + 56) / 112;	// scale up
+		j = MIN(127, MAX(-128, j));
+#endif
+
+		XlatV_B[i] = MulDiv (j, 1000, 564);	/* j*219/126 */
+		XlatV_G[i] = MulDiv (j, 1100, 3328);
+		XlatU_G[i] = MulDiv (j, 3100, 4207);
+		XlatU_R[i] = MulDiv (j, 1000, 713);
+	}
+}
+
+void inline yuv_convert_rgb24(unsigned char *rawY, unsigned char *rawU, 
+		unsigned char *rawV, unsigned char *rgb, int size)
+{
+	unsigned short  buf1, buf3;
+	int   red;
+	int   blue;
+	int   green;
+	unsigned long   cnt;
+	int    Y, U, V;
+
+	for ( cnt = 0 ; cnt < size; cnt +=2){
+		buf1 = *(rawY+cnt) & 0xff;  // Y data
+		buf3 = *(rawY+cnt+1) & 0xff;  // Y data
+
+		U = *(rawV+cnt/2) & 0xff;
+		V = *(rawU+cnt/2) & 0xff;
+
+#if MORE_QUALITY
+		Y = buf1;
+#else
+		Y = ((buf1+buf3)/2);
+#endif
+
+		red = XlatY[Y] + XlatU_R[U];
+		CLIP(red);
+		green = XlatY[Y] - XlatV_G[V] - XlatU_G[U];
+		CLIP(green);
+		blue = XlatY[Y] + XlatV_B[V];
+		CLIP(blue);
+
+		*rgb ++ = red & 0xff;
+		*rgb ++ = green & 0xff;
+		*rgb ++ = blue & 0xff;
+
+#if MORE_QUALITY
+		Y = buf3;
+		red = XlatY[Y] + XlatU_R[U];
+		CLIP(red);
+		green = XlatY[Y] - XlatV_G[V] - XlatU_G[U];
+		CLIP(green);
+		blue = XlatY[Y] + XlatV_B[V];
+		CLIP(blue);
+#endif
+		*rgb ++ = red & 0xff;
+		*rgb ++ = green & 0xff;
+		*rgb ++ = blue & 0xff;
+	}
+}
+static void v4l2_save_yuv420_to_jpg(int fd)
+{
+	char yuv420buf[640*480*2];
+	char rgb24buf[640*480*3];
+	char *yuv420 = &yuv420buf[0];
+	char *rgb24 = &rgb24buf[0];
+	FILE *jpg_fp = NULL;
+	int i;
+
+	JSAMPROW row_pointer[480];
+
+	for (i=0; i<480; i++)
+		row_pointer[i] = (JSAMPROW)&rgb24buf[640*i*3];
+
+	if ((read (fd, &yuv420buf, 640*480*2)) < 0) {
+		perror("read");
+		return;
+	}
+
+	/*
+	 * work-arround for CPU bug
+	 *
+	 * retry
+	 */
+	if ((read (fd, &yuv420buf, 640*480*2)) < 0) {
+		perror("read");
+		return;
+	}
+
+	jpg_fp = fopen(YUV420_FILE, "wb");
+	if (!jpg_fp) {
+		perror(YUV420_FILE);
+		return;
+	}
+
+	cinfo.err = jpeg_std_error(&jerr);
+	jpeg_create_compress(&cinfo);
+
+	jpeg_stdio_dest(&cinfo, jpg_fp);
+
+	cinfo.image_width = 640;
+	cinfo.image_height = 480;
+	cinfo.input_components = 3;
+	cinfo.in_color_space = JCS_RGB;
+
+	jpeg_set_defaults(&cinfo);
+
+	jpeg_set_quality(&cinfo, quality, TRUE);
+	
+	jpeg_start_compress(&cinfo, TRUE);
+
+	/* YUV420 -> RGB24 */
+	yuv_convert_rgb24( 
+			yuv420, yuv420 + 640*480, yuv420 + 640*480/2*3,
+			rgb24, 640*480);
+
+	jpeg_write_scanlines(&cinfo, row_pointer, 480);
+
+	jpeg_finish_compress(&cinfo);
+	jpeg_destroy_compress(&cinfo);
+
+	if (jpg_fp)
+		fclose(jpg_fp);
+
+	printf("   save to \"%s\"\n", YUV420_FILE);
+}
+
+void v4l2_adjust_hw_to_default(int fd, V_QRYCTRL *qc)
+{
+	int i;
+	V_QRYCTRL *qc_0 = qc;
+	struct v4l2_control vc;
+
+	/* integer */
+	for (i=0; i<CTRL_NUM; i++) {
+		if (!(qc->id))
+			break;
+		if (qc->type == V4L2_CTRL_TYPE_INTEGER) {
+
+			vc.id = qc->id;
+
+#if 0
+			vc.value = qc->minimum;
+			if (ioctl(fd, VIDIOC_S_CTRL, &vc) < 0) {
+				perror("VIDIOC_S_CTRL");
+				continue;
+			}
+			vc.value = qc->maximum;
+			if (ioctl(fd, VIDIOC_S_CTRL, &vc) < 0) {
+				perror("VIDIOC_S_CTRL");
+				continue;
+			}
+#endif
+			vc.value = qc->default_value;
+			if (ioctl(fd, VIDIOC_S_CTRL, &vc) < 0) {
+				perror("VIDIOC_S_CTRL");
+				continue;
+			}
+			printf("   set [%s] to %d\n", qc->name, vc.value);
+		}
+		qc++;
+	}
+
+	/* boolean */
+	qc = qc_0;
+	for (i=0; i<CTRL_NUM; i++) {
+		if (!(qc->id))
+			break;
+		vc.id = qc->id;
+		if (qc->type == V4L2_CTRL_TYPE_BOOLEAN) {
+			vc.value = qc->default_value;
+			if (ioctl(fd, VIDIOC_S_CTRL, &vc) < 0) {
+				perror("VIDIOC_S_CTRL");
+				continue;
+			}
+			printf("   set [%s] to %s\n", qc->name, vc.value ? "TRUE":"FALSE");
+		}
+		qc++;
+	}
+}
+
+static unsigned int fb_grab(int fd, char **fbmem)
+{
+	F_VINFO modeinfo;
+	unsigned int length;
+
+	if (ioctl(fd, FBIOGET_VSCREENINFO, &modeinfo) < 0) {
+		perror("FBIOGET_VSCREENINFO");
+		exit (EXIT_FAILURE);
+	}
+	length = modeinfo.xres * modeinfo.yres * (modeinfo.bits_per_pixel >> 3);
+
+	printf("  %d x %d, %d bpp\n",
+			modeinfo.xres, modeinfo.yres, modeinfo.bits_per_pixel);
+
+	*fbmem = mmap(0, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+	if (*fbmem < 0) {
+		perror("mmap()");
+		length = 0;
+	}
+
+	return length;
+}
+
+static void fb_ungrab(char **fbmem, unsigned int length)
+{
+	if (*fbmem)
+		munmap(*fbmem, length);
+}
+
+/*
+int main(int argc, char *argv[])
+{
+	int v4l2_fd = -1;
+	int fb_fd = -1;
+	char *fbmem = NULL;
+	unsigned int fb_length = 0;
+	V_FORMAT fmt;
+	V_INPUT inp[INPUT_NUM];
+	V_QRYCTRL qc[CTRL_NUM];
+	V_FMTDESC pix[PIXFMT_NUM];
+	int preview_frames = 180;
+	int tmp;
+
+	if (argc > 1) {
+		if (sscanf(argv[1], "%d", &tmp) == 1)
+			preview_frames = tmp;
+	}
+
+	printf("Start Main \n");
+	v4l2_fd = open(V4L2_DEV_NODE, O_RDWR);
+	if (v4l2_fd < 0) {
+		perror(V4L2_DEV_NODE);
+		goto out;
+	}
+
+	printf("Before openning FB \n");
+	fb_fd = open(FB_DEV_NODE, O_RDWR);
+	if (fb_fd < 0) {
+		perror(FB_DEV_NODE);
+		goto out;
+	}
+
+	printf("\n");
+	printf("======================\n");
+	printf("FB : Driver Capacities\n");
+	printf("======================\n");
+	fflush(stdout);
+	if ((fb_length = fb_grab(fb_fd, &fbmem)) == 0)
+		goto out;
+	memset(fbmem, 0, fb_length);
+
+	printf("\n");
+	printf("========================\n");
+	printf("V4L2 : Driver Capacities\n");
+	printf("========================\n");
+	fflush(stdout);
+	v4l2_print_settings(v4l2_fd, &inp[0], &fmt, &pix[0], &qc[0]);
+
+	printf("\n");
+
+	printf("===================================\n");
+	printf("V4L2 : Adjust Camera H/W to default\n");
+	printf("===================================\n");
+	fflush(stdout);
+	v4l2_adjust_hw_to_default(v4l2_fd, &qc[0]);
+
+	printf("\n");
+
+	printf("============================\n");
+	printf("V4L2 : Configure for Preview\n");
+	printf("============================\n");
+	fflush(stdout);
+	v4l2_config_for_preview(v4l2_fd, &fmt, &pix[0]);
+
+	printf("\n");
+
+	printf("===============================\n");
+	printf("V4L2 : Show %d frames on LCD\n", preview_frames);
+	printf("===============================\n");
+	fflush(stdout);
+	v4l2_show_on_fb(v4l2_fd, fbmem, preview_frames);
+	
+	printf("\n");
+
+	printf("===================================\n");
+	printf("V4L2 : Configure for YUV420 Capture\n");
+	printf("===================================\n");
+	fflush(stdout);
+	v4l2_config_for_yuv420_capture(v4l2_fd, &fmt, &pix[0]);
+
+	printf("\n");
+
+	printf("=====================================\n");
+	printf("V4L2 : Capture 1 YUV420 frame to JPEG\n");
+	printf("=====================================\n");
+	fflush(stdout);
+	init_yuvtable();
+	v4l2_save_yuv420_to_jpg(v4l2_fd);
+	
+	printf("\n");
+
+out:
+
+	if (v4l2_fd > 0)
+		close(v4l2_fd);
+
+	fb_ungrab(&fbmem, fb_length);
+
+	if (fb_fd > 0)
+		close(fb_fd);
+
+	return 0;
+}
+*/
+
+#ifdef JPEG_TEST
+#include "422jpeg.h"
+static void test_ycbcr_to_rgb(void *scr)
+{	
+	__u8 *buffer_y, *buffer_cb, *buffer_cr;		
+	buffer_y  = (__u8 *)c422jpeg;	
+	buffer_cb = buffer_y  + 240 * 320;	
+	buffer_cr = buffer_cb + 240 * 320 / 2;		
+	printf("Test YCbCr422 to RGB...\n");	
+	show_cam_img2(scr, buffer_y, buffer_cb, buffer_cr);	
+}
+#endif
+
+int main(void)
+{
+	int v4l2_fd = -1;
+	int fb_fd = -1;
+	int n=0;
+	__u8 *fb_buf;
+	__u8 *buf;
+	__u32 screensize;
+	//__u16 rgb565[COLS*ROWS];
+		V_FORMAT fmt;
+	V_INPUT inp;
+	V_QRYCTRL qc;
+	V_FMTDESC pix;
+	struct v4l2_capability caminfo;
+	char c_start='O';
+	
+	printf("Start Main \n");
+	v4l2_fd = open(V4L2_DEV_NODE, O_RDWR);
+	if (v4l2_fd < 0) {
+		printf(" open video ERR\n");
+	}
+
+	printf("Before openning FB \n");
+	fb_fd = open(FB_DEV_NODE, O_RDWR);
+	if (fb_fd < 0) {
+		printf(" open FB ERR\n");
+	}
+	
+	screensize = 480 * 272 * 16 / 8;
+	fb_buf = (char *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED,
+				fb_fd, 0);
+	if ((int)fb_buf == -1) {
+		printf("Error: failed to map framebuffer device to memory.\n");
+		close(fb_fd);
+     return -1;
+	}
+
+	if((n =(ioctl(v4l2_fd, VIDIOC_QUERYCAP, &caminfo)))<0)
+	 	printf("Error: failed to get camera info.%d\n",n);
+	 //设置图象模式
+	 	fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		fmt.fmt.pix.width = 320;
+		fmt.fmt.pix.height = 240;
+		fmt.fmt.pix.depth = 16;
+		fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUV422P;
+		
+		if((ioctl(v4l2_fd, VIDIOC_S_FMT, &fmt))<0)
+		printf("Error: failed to set video format.\n");
+		buf = malloc(320*240*3);
+		//memset(buf,0,sizeof(buf));
+		//while(1);
+		if((write(v4l2_fd,&c_start,sizeof(c_start))) == 0)			
+		printf("start to get pic %d\n",(int)fmt.fmt.pix.sizeimage);
+	/*	while(1){
+			n=read(v4l2_fd, buf, 320*240*3/2);
+			ccvt_420p_rgb565(COLS, ROWS, buf, rgb565);
+			printf("display%d\n",n);
+			show_rgb565_img(fb_buf,rgb565);
+		}*/
+	//	test_ycbcr_to_rgb(fb_buf);
+	
+		while(1)
+		{
+			n=read(v4l2_fd, buf, 320*240*2);
+			if(n<0) 
+					printf("read fail!%d\n", n);
+		//	printf("show frame on FB1\r\n");
+			show_cam_img(fb_buf, buf,	buf+320*240,buf+(320*240*3)/2); 
+		//	printf("show frame on FB2\r\n");
+		}
+}
