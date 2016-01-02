@@ -89,22 +89,18 @@ int	main()
    ioctl(fd,FBIOGET_VSCREENINFO, &modeinfo);
    
    
-  draw_rect(0, 0,200, 200, RGB16(255, 56, 2), fbmem_addr);
-   //   draw_bitmap(0,0,"test.bmp", fbmem_addr);
+   //    draw_rect(0, 0,200, 200, RGB16(255, 56, 2), fbmem_addr);
+   draw_bitmap(0,0,"test.bmp", fbmem_addr);
 
 
-  usleep(500000);
-  draw_rect(5, 0,225, 206, RGB16(88, 66, 5), fbmem_addr);
-  usleep(500000);
-  draw_rect(2, 20,58, 105, RGB16(12, 100, 53), fbmem_addr);
-  usleep(500000);
-  draw_rect(100, 78,200, 200, RGB16(00, 25, 53), fbmem_addr);
-  usleep(500000);
-  draw_rect(17, 78,200, 200, RGB16(200, 42, 11), fbmem_addr);
-  usleep(500000);
-  draw_rect(58, 150,200, 200, RGB16(5, 96, 88), fbmem_addr);
-  usleep(500000);
-  draw_rect(55, 125,200, 200, RGB16(256, 5, 48), fbmem_addr);
-  
+
+   // draw_rect(12, 78,200, 200, RGB(55, 5, 54), fbmem_addr);
+  /*draw_rect(5, 0,225, 206, RGB(88, 66, 5), fbmem_addr);
+  draw_rect(2, 20,58, 105, RGB(12, 100, 53), fbmem_addr);
+  draw_rect(100, 78,200, 200, RGB(00, 25, 53), fbmem_addr);
+  draw_rect(17, 78,200, 200, RGB(200, 42, 11), fbmem_addr);
+  draw_rect(58, 150,200, 200, RGB(5, 96, 88), fbmem_addr);
+  draw_rect(55, 125,200, 200, RGB(256, 5, 48), fbmem_addr);
+  */
   return (0);
 }

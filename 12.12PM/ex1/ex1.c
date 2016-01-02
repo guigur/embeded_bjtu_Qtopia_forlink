@@ -12,7 +12,6 @@
 #define VIDEO_HEIGHT 240
 #define VIDEO_DEPTH  16
 
-
 int main()
 {
   struct fb_var_screeninfo modeinfo;
@@ -31,13 +30,17 @@ int main()
   
   ioctl(fdfbo, FBIOGET_VSCREENINFO, &modeinfo);
 
-  fbmem_addr = mmap(0, size, PROT_READ |
-		    PROT_WRITE, MAP_SHARED, fdfbo, 0);
-  while (42)
-  {
-    write(1, "suce\n", 5);
-    read(fdcam, fbmem_addr, size);
-    write(fdfbo, fbmem_addr, size);
-  }
+  //  fbmem_addr = mmap(0, size, PROT_READ | PROT_WRITE, MAP_SHARED, fdfbo, 0);
+  //while (cinfo.next_scanline < cinfo.image_height)
+  /*{
+      row_pointer[0] = &image_buffer[cinfo.next_scanline * image_width * 3];
+      (void) jpeg_write_scanlines(&cinfo, row_pointer, 1);
+      }*/
+
+  draw_pixel(10,10);
+    // write(1, "suce\n", 5);
+    //read(fdcam, fbmem_addr, size);
+    //write(fdfbo, fbmem_addr, size);
+    //}
   return 0;
 }
