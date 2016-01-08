@@ -1,11 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
 #include <jpeglib.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include <stropts.h>
 #include <linux/fb.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
@@ -18,6 +16,20 @@
 #define CAM_WIDTH 320
 #define CAM_HEIGHT 240
 #define CAM_DEPTH 24
+
+typedef struct InputData
+{
+  unsigned int dummy1;
+  unsigned int dummy2;
+  unsigned short type;
+  unsigned short code;
+  unsigned int value;
+  unsigned int dummy3;
+  unsigned int dummy4;
+  unsigned int dummy5;
+  unsigned int dummy6;
+}input_t;
+
 
 void saveimg(char *buffer)
 {
@@ -47,19 +59,13 @@ void saveimg(char *buffer)
   jpeg_finish_compress(&cinfo);
 }
 
-typedef struct InputData
-{
-  unsigned short code;
-  unsigned short type;
-  unsigned int value;
-}input_t;
-
 int main()
 {
   struct fb_var_screeninfo modeinfo;
   struct v4l2_format fmt; //Frame format, such
 
-  int fdcam = 0, fdfbo = 0;
+  int fdcam = 0, fdfbo = 0, fdev = 0;
+  input_t input;
   int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
   fmt.fmt.pix.width  = VIDEO_WIDTH;
@@ -72,26 +78,24 @@ int main()
   //int cambuf[size];
   char *fbmem_addr;
 
+  read(fdev, &input, sizeof(input));
   fdcam = open("/dev/video0", O_RDWR);
   fdfbo = open("/dev/fb0", O_RDWR);
-  if (!fdcam || !fdfbo)
+  fdev  = open("/dev/event0", O_RDONLY);
+  if (!fdcam || !fdfbo || !fdev)
     printf("ERROR: Bad file descriptor\n");
   
   ioctl(fdfbo, FBIOGET_VSCREENINFO, &modeinfo);
   ioctl(fdcam, VIDIOC_S_FMT, &fmt);
   ioctl(fdcam, VIDIOC_STREAMON, &fmt.type);
-  int m_fd;
-  m_fd = open("/dev/input/event0", O_RDONLY);
-  input_t input;
- while (42)
+    
+  while (42)
 {
-  int ret = read(m_fd, &input, sizeof(input));
-  printf("type =%d code=%d, value=%d\n", input.type, input.code, input.value);
   fbmem_addr = mmap(0, cam_size, PROT_READ | PROT_WRITE, MAP_SHARED, fdfbo, 0);
   read(fdcam,  fbmem_addr, cam_size);
   write(fdfbo, fbmem_addr, video_size);
-
-  saveimg(fbmem_addr);
+  if (input.type == 1 && input.code == 106 && input.value == 1)
+    saveimg(fbmem_addr);
  }
  
   return 0;
